@@ -23,9 +23,13 @@ library(dummies)
 library(caret)
 library(FactoMineR)
 
+#### User Inputs ####
+
+setwd("/opt/R/R_project/pperrin/2020/Fantasy_Sports")
+
 #### Load Up Fanduel Data ####
 
-fanduel_df <- read.csv("/opt/R/R_project/pperrin/2020/Fantasy_Sports/Data/FanDuel-NBA-2020-02-20-43597-players-list.csv", stringsAsFactors = F)
+fanduel_df <- read.csv("Data/FanDuel-NBA-2020-02-24-43885-players-list.csv", stringsAsFactors = F)
 
 fanduel_df$Tier <- NULL
 
@@ -47,6 +51,7 @@ fanduel_df_2$Last.Name<- NULL
 
 fanduel_df_2$Team<- NULL
 
+fanduel_df_2$Nickname <- ifelse(fanduel_df_2$Nickname == "KELLY OUBRE", "KELLY OUBRE JR.", fanduel_df_2$Nickname)
 
 #### Load Fantasy Data ####
 
@@ -58,7 +63,7 @@ saveRDS(a, file = "/opt/R/R_project/pperrin/2020/Fantasy_Sports/Data/hst.rds")
 
 #a <- readRDS(file = "/opt/R/R_project/pperrin/2020/Fantasy_Sports/Data/hst.rds")
 
-a_2 <- subset(a, select = c("dateGame", "namePlayer", "treb", "ast", "stl", "blk", "tov", "pts", "slugOpponent", "slugTeam"))
+a_2 <- subset(a, select = c("dateGame", "namePlayer", "treb", "ast", "stl", "blk", "tov", "pts", "slugOpponent", "slugTeam", "locationGame"))
 
 #a_2 <- subset(a_2, toupper(a_2$namePlayer) == "LEBRON JAMES")
 
@@ -137,6 +142,8 @@ emberd_nba <- embed.hierarchy(df_hier = a_4, df_var_vector = c("slugOpponent"), 
 
 a_5 <- left_join(a_4, emberd_nba)
 
+a_5$home_ind <- ifelse(a_5$locationGame == "H", 1, 0)
+
 #### LOOP FORECAST ####
 
 a_5$Nickname <- a_5$namePlayer
@@ -162,6 +169,26 @@ for(i in 1:length(unique(a_6$Nickname))){
   
   #print(opp)
   
+  #Fix opp data
+  
+  if(nrow(subset(fanduel_df_2, fanduel_df_2$Nickname == unique(a_6_temp$Nickname))) > 0){
+    
+    if(opp == "NY"){
+      
+      opp <- "NYK"
+      
+    } else if(opp == "PHO"){
+      
+      opp <- "PHX"
+      
+    } else{
+      
+      opp <- opp
+      
+    }
+    
+  }
+  
   opp_dat <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5"))
   
   if((nrow(opp_dat) > 0) & (nrow(a_6_temp) > 2)){
@@ -170,9 +197,27 @@ for(i in 1:length(unique(a_6$Nickname))){
     
     time_series <- ts(a_6_temp$fantasy_points)
     
-    nn_fit <- nnetar(time_series, repeats = 50, xreg = subset(a_6_temp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5")), lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE)
+    #get home or away
     
-    nn_forecast <- forecast(nn_fit, h = freq, xreg = subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5")))
+    home_or_away <- subset(fanduel_df_2, fanduel_df_2$Nickname == unique(a_6_temp$Nickname))
+    
+    if(strsplit(home_or_away$Game, "@")[[1]][2] == home_or_away$Opponent){
+      
+      the_home_ind <- 0
+      
+    } else{
+      
+      the_home_ind <- 1
+      
+    }
+    
+    nn_fit <- nnetar(time_series, repeats = 50, xreg = subset(a_6_temp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5", "home_ind")), lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE)
+    
+    x_regs <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5"))
+    
+    x_regs$home_ind <- the_home_ind
+    
+    nn_forecast <- forecast(nn_fit, h = freq, xreg = x_regs)
     
     if(j == 1){
       
@@ -298,9 +343,11 @@ opt_lineup <- function(the_data, the_var, salary){
   
 }
 
-b1 <- opt_lineup(the_data = fanduel_df_3, the_var = "gmean", salary = 60000)
+z_FPPG_Played_fantasy_points <- opt_lineup(the_data = fanduel_df_3, the_var = "gmean", salary = 60000)
 
-b2 <- opt_lineup(the_data = fanduel_df_3, the_var = "gmean_2", salary = 60000)
+z_Played_fantasy_points <- opt_lineup(the_data = fanduel_df_3, the_var = "gmean_2", salary = 60000)
+
+z_fantasy_points <- opt_lineup(the_data = fanduel_df_3, the_var = "fantasy_points", salary = 60000)
 
 #### Optional TEST section ####
 
@@ -315,6 +362,16 @@ test_2$resid <- test_2$`Point Forecast` - test_2$fantasy_points
 test_2$ape <- (test_2$`Point Forecast` - test_2$fantasy_points)/test_2$fantasy_points
 
 print(paste0("rmse is: ", sd(test_2$resid)))
+
+#### save data ####
+
+time_stamp <- str_replace_all(substr(Sys.time(), 1, 10), "-","_")
+
+saveRDS(z_FPPG_Played_fantasy_points, file = paste0("Output/FPPG_Played_fantasy_points", time_stamp, ".rds"))
+
+saveRDS(z_Played_fantasy_points, file = paste0("Output/Played_fantasy_points", time_stamp, ".rds"))
+
+saveRDS(z_fantasy_points, file = paste0("Output/fantasy_points", time_stamp, ".rds"))
 
 #### Stop the Clock ####
 
@@ -331,6 +388,8 @@ print(end_time - start_time)
 #### This is the End #### 
 
 ##### Scrap Code #####
+
+write_csv(a_6, "MISC/a_6.csv")
 
 #### B 2020/02/21 ####
 
