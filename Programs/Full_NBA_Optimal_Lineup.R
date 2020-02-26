@@ -49,7 +49,7 @@ fanduel_df_2$First.Name <- NULL
 
 fanduel_df_2$Last.Name<- NULL
 
-fanduel_df_2$Team<- NULL
+#### FIX NAME MISMATCHES HERE ####
 
 fanduel_df_2$Nickname <- ifelse(fanduel_df_2$Nickname == "KELLY OUBRE", "KELLY OUBRE JR.", fanduel_df_2$Nickname)
 
@@ -59,11 +59,13 @@ plan(multiprocess)
 
 a <- game_logs(seasons = 2018:2020)
 
-saveRDS(a, file = "/opt/R/R_project/pperrin/2020/Fantasy_Sports/Data/hst.rds")
+saveRDS(a, file = "Data/hst.rds")
 
 #a <- readRDS(file = "/opt/R/R_project/pperrin/2020/Fantasy_Sports/Data/hst.rds")
 
 a_2 <- subset(a, select = c("dateGame", "namePlayer", "treb", "ast", "stl", "blk", "tov", "pts", "slugOpponent", "slugTeam", "locationGame"))
+
+a_2$namePlayer <- ifelse(grepl(" " , a_2$namePlayer), a_2$namePlayer, paste0(a_2$namePlayer, " "))
 
 #a_2 <- subset(a_2, toupper(a_2$namePlayer) == "LEBRON JAMES")
 
@@ -165,6 +167,36 @@ for(i in 1:length(unique(a_6$Nickname))){
   
   print(unique(a_6_temp$Nickname))
   
+  #### Create teammate features ####
+  
+  #z_2 <- sqldf("SELECT DISTINCT Nickname, dateGame, slugTeam FROM a_6 WHERE Nickname != 'LEBRON JAMES'")
+  
+  z_2 <- sqldf(paste0('SELECT DISTINCT Nickname, dateGame, slugTeam FROM a_6 WHERE Nickname != "', unique(a_6_temp$Nickname), '"'))
+  
+  z_3 <- sqldf("
+             
+   SELECT    
+             
+    l.*,
+    r.Nickname AS teammates,
+    1 AS dum
+             
+  FROM a_6_temp AS l
+  LEFT JOIN z_2 AS r
+  ON 
+   l.dateGame = r.dateGame AND
+   l.slugTeam = r.slugTeam
+             
+  ")
+  
+  # The arguments to spread():
+  # - data: Data object
+  # - key: Name of column containing the new column names
+  # - value: Name of column containing values
+  z_4 <- spread(z_3, teammates, dum)
+  
+  z_4[is.na(z_4)] <- 0
+  
   opp <- subset(fanduel_df_2, fanduel_df_2$Nickname == unique(a_6_temp$Nickname))$Opponent
   
   #print(opp)
@@ -180,6 +212,10 @@ for(i in 1:length(unique(a_6$Nickname))){
     } else if(opp == "PHO"){
       
       opp <- "PHX"
+      
+    } else if(opp == "NO"){
+      
+      opp <- "NOP"
       
     } else{
       
@@ -211,13 +247,69 @@ for(i in 1:length(unique(a_6$Nickname))){
       
     }
     
-    nn_fit <- nnetar(time_series, repeats = 50, xreg = subset(a_6_temp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5", "home_ind")), lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE)
+    #### Train Neural Net ####
+    
+    x_train <- left_join(a_6_temp, z_4) %>% select(c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5", "home_ind", grep(" ", names(z_4), value=TRUE)))
+    
+    nn_fit <- nnetar(time_series, repeats = 50, xreg = x_train, lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE, MaxNWts = 4000)
     
     x_regs <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5"))
     
     x_regs$home_ind <- the_home_ind
     
-    nn_forecast <- forecast(nn_fit, h = freq, xreg = x_regs)
+    #### FORMAT TEST DATA ####
+    
+    fanduel_temp <- subset(fanduel_df_2, toupper(fanduel_df_2$Nickname) == toupper(unique(a_6_temp$Nickname)))
+    
+    x_test <- sqldf(paste0('SELECT DISTINCT Nickname, Team FROM fanduel_df_2 WHERE Nickname != "', unique(a_6_temp$Nickname), '"'))
+    
+    x_test_2 <- sqldf("
+             
+    SELECT    
+             
+     l.*,
+     r.Nickname AS teammates,
+     1 AS dum
+             
+    FROM fanduel_temp AS l
+    LEFT JOIN x_test AS r
+    ON 
+     l.Team = r.Team
+             
+    ")
+    
+    x_test_2$teammates <- toupper(x_test_2$teammates)
+    
+    x_test_3 <- sqldf("
+                      
+    SELECT
+     
+     l.teammates AS teammates,
+     r.dum AS dum
+
+    FROM (SELECT DISTINCT teammates FROM z_3) AS l
+    LEFT JOIN x_test_2 AS r
+    ON 
+     l.teammates = r.teammates
+                      
+    ")
+    
+    x_test_3$dum <- ifelse(is.na(x_test_3$dum), 0, 1)
+    
+    # The arguments to spread():
+    # - data: Data object
+    # - key: Name of column containing the new column names
+    # - value: Name of column containing values
+    
+    x_test_4 <- spread(x_test_3, teammates, dum)
+    
+    x_test_4[is.na(x_test_4)] <- 0
+    
+    x_test_5 <- bind_cols(x_regs, x_test_4)
+    
+    #### Run model on test data ####
+    
+    nn_forecast <- forecast(nn_fit, h = freq, xreg = x_test_5)
     
     if(j == 1){
       
@@ -405,19 +497,19 @@ z_2 <- sqldf("SELECT DISTINCT Nickname, dateGame, slugTeam FROM a_6 WHERE Nickna
 
 z_3 <- sqldf("
              
-             SELECT    
+SELECT    
              
-             l.*,
-             r.Nickname AS teammates,
-             1 AS dum
+ l.*,
+ r.Nickname AS teammates,
+ 1 AS dum
              
-             FROM z_1 AS l
-             LEFT JOIN z_2 AS r
-             ON 
-             l.dateGame = r.dateGame AND
-             l.slugTeam = r.slugTeam
+FROM z_1 AS l
+LEFT JOIN z_2 AS r
+ON 
+ l.dateGame = r.dateGame AND
+ l.slugTeam = r.slugTeam
              
-             ")
+")
 
 # The arguments to spread():
 # - data: Data object
@@ -442,37 +534,3 @@ temp <- as.data.frame(dummy(a_4$slugOpponent, verbose = T, sep = "::"))
 colnames(temp) <- sub("slugOpponent, verbose = T, sep = \"::\")::", "", colnames(temp))
 
 temp_2 <- cbind(a_4, temp)
-
-
-embed.hierarchy <- function(df_hier, df_var_vector, num_features){
-  
-  embed_stat_time <- Sys.time()
-  
-  a_1 <- subset(df_hier, select = df_var_vector)
-  
-  a_1 <- unique(a_1[df_var_vector])
-  
-  # dummify the data
-  
-  dmy <- dummyVars(" ~ .", data = a_1)
-  
-  trsf <- data.frame(predict(dmy, newdata = a_1))
-  
-  trsf <- trsf %>% mutate_all(as.character)
-  
-  gc()
-  
-  mca1 = MCA(trsf, ncp = num_features, ind.sup = NULL, quanti.sup = NULL, 
-             quali.sup = NULL, excl=NULL, graph = TRUE, 
-             level.ventil = 0, axes = c(1,2), row.w = NULL, 
-             method="Indicator", na.method="NA", tab.disj=NULL)
-  
-  a_2 <- cbind(a_1, mca1$ind$coord)
-  
-  names(a_2) <- gsub(x = names(a_2), pattern = " ", replacement = "_") 
-  
-  print(Sys.time()-embed_stat_time)
-  
-  return(a_2)
-  
-}
