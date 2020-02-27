@@ -27,6 +27,9 @@ library(FactoMineR)
 
 setwd("/opt/R/R_project/pperrin/2020/Fantasy_Sports")
 
+#Disable Scientific Notation
+options(scipen = 999)
+
 #### Load Up Fanduel Data ####
 
 fanduel_df <- read.csv("Data/FanDuel-NBA-2020-02-24-43885-players-list.csv", stringsAsFactors = F)
@@ -142,6 +145,8 @@ embed.hierarchy <- function(df_hier, df_var_vector, num_features){
 
 emberd_nba <- embed.hierarchy(df_hier = a_4, df_var_vector = c("slugOpponent"), num_features = 5)
 
+names(emberd_nba) <- gsub(x = names(emberd_nba), pattern = "Dim", replacement = "opponent_feature") 
+
 a_5 <- left_join(a_4, emberd_nba)
 
 a_5$home_ind <- ifelse(a_5$locationGame == "H", 1, 0)
@@ -225,7 +230,7 @@ for(i in 1:length(unique(a_6$Nickname))){
     
   }
   
-  opp_dat <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5"))
+  opp_dat <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("opponent_feature_1", "opponent_feature_2", "opponent_feature_3", "opponent_feature_4", "opponent_feature_5"))
   
   if((nrow(opp_dat) > 0) & (nrow(a_6_temp) > 2)){
     
@@ -247,13 +252,36 @@ for(i in 1:length(unique(a_6$Nickname))){
       
     }
     
+    #### Create teammates feature ####
+    
+    #Distinct Combination of teammates
+    
+    temp <- distinct(subset(z_4, select = grep(" ", names(z_4), value=TRUE)))
+    
+    temp <- temp %>% mutate_all(as.character)
+    
+    mca1 = MCA(temp, ncp = 4, ind.sup = NULL, quanti.sup = NULL, 
+               quali.sup = NULL, excl=NULL, graph = TRUE, 
+               level.ventil = 0, axes = c(1,2), row.w = NULL, 
+               method="Indicator", na.method="NA", tab.disj=NULL)
+    
+    z_5 <- cbind(temp, mca1$ind$coord)
+    
+    #names(z_5) <- gsub(x = names(z_5), pattern = " ", replacement = "_") 
+    
+    names(z_5) <- gsub(x = names(z_5), pattern = "Dim", replacement = "teammates_feature")
+    
+    z_5 <- z_5 %>% mutate_all(as.numeric)
+    
+    z_6 <- left_join(z_4, z_5)
+    
     #### Train Neural Net ####
     
-    x_train <- left_join(a_6_temp, z_4) %>% select(c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5", "home_ind", grep(" ", names(z_4), value=TRUE)))
+    x_train <- left_join(a_6_temp, z_6) %>% select(c(grep("opponent_feature", names(z_6), value=TRUE), "home_ind", grep("teammates_feature", names(z_6), value=TRUE)))
     
-    nn_fit <- nnetar(time_series, repeats = 50, xreg = x_train, lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE, MaxNWts = 4000)
+    nn_fit <- nnetar(time_series, repeats = 50, xreg = x_train, lambda = NULL, model = NULL, subset = NULL, scale.inputs = TRUE, MaxNWts = 1000)
     
-    x_regs <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("Dim_1", "Dim_2", "Dim_3", "Dim_4", "Dim_5"))
+    x_regs <- subset(emberd_nba, emberd_nba$slugOpponent == opp, select = c("opponent_feature_1", "opponent_feature_2", "opponent_feature_3", "opponent_feature_4", "opponent_feature_5"))
     
     x_regs$home_ind <- the_home_ind
     
@@ -307,9 +335,78 @@ for(i in 1:length(unique(a_6$Nickname))){
     
     x_test_5 <- bind_cols(x_regs, x_test_4)
     
+    #### MOST SIMLIAR LINEUP ####
+    
+    yyyy <- x_test_5
+    
+    names(yyyy) <- gsub(x = names(yyyy), pattern = " ", replacement = ":") 
+    
+    zzzz <- sqldf("
+                  
+                  SELECT 
+                  l.*,
+                  r.*
+                  FROM z_4 AS l
+                  LEFT JOIN yyyy AS r
+                  
+                  ")
+
+    # The arguments to gather():
+    # - data: Data object
+    # - key: Name of new key column (made from names of data columns)
+    # - value: Name of new value column
+    # - ...: Names of source columns that contain values
+    # - factor_key: Treat the new key column as a factor (instead of character vector)
+
+    zzzz_1 <- gather(zzzz, hist_team, ind,  grep(" ", names(zzzz), value=TRUE), factor_key=TRUE)
+
+    zzzz_2 <- gather(zzzz, current_team, ind_2,  grep(":", names(zzzz), value=TRUE), factor_key=TRUE)
+
+    zzzz_1 <- subset(zzzz_1, select = c("dateGame","hist_team", "ind"))
+
+    zzzz_2 <- subset(zzzz_2, select = c("current_team", "ind_2"))
+
+    zzzz_3 <- bind_cols(zzzz_1, zzzz_2)
+
+    zzzz_3$match <- ifelse(zzzz_3$ind == zzzz_3$ind_2, 1, 0)
+
+    zzzz_4 <- sqldf("
+                
+     SELECT
+      dateGame,
+      SUM(match) AS match
+                
+     FROM zzzz_3
+     GROUP BY dateGame
+     ORDER BY match DESC, dateGame DESC
+                
+    ")
+
+    zzzz_5 <- head(zzzz_4, n = 1)
+
+    zzzz_6 <- inner_join(zzzz_5, z_6)
+    
+    x_test_5 <- x_test_5 %>% select(c(grep("opponent_feature", names(x_test_5), value=TRUE), "home_ind"))
+    
+    zzzz_6 <- zzzz_6 %>% select(c(grep("teammates_feature", names(zzzz_6), value=TRUE)))
+    
+    x_test_6 <- cbind(x_test_5, zzzz_6)
+    
+    if(any(is.na(x_test_6))){
+      
+      print("Teammate Combination Not Found")
+      
+    } else{
+      
+      print("Teammate Combination Found!")
+      
+    }
+    
+    x_test_6[is.na(x_test_6)] <- 0
+    
     #### Run model on test data ####
     
-    nn_forecast <- forecast(nn_fit, h = freq, xreg = x_test_5)
+    nn_forecast <- forecast(nn_fit, h = freq, xreg = x_test_6)
     
     if(j == 1){
       
@@ -443,7 +540,7 @@ z_fantasy_points <- opt_lineup(the_data = fanduel_df_3, the_var = "fantasy_point
 
 #### Optional TEST section ####
 
-test <- subset(a_5, a_5$dateGame >= as.Date("2020-02-20"))
+test <- subset(a_5, a_5$dateGame == as.Date("2020-02-24"))
 
 test_2 <- left_join(nn_out, test)
 
@@ -452,6 +549,8 @@ test_2 <- na.omit(test_2)
 test_2$resid <- test_2$`Point Forecast` - test_2$fantasy_points
 
 test_2$ape <- (test_2$`Point Forecast` - test_2$fantasy_points)/test_2$fantasy_points
+
+test_2 <- subset(test_2, select = c("Point Forecast", "Nickname", "fantasy_points", "resid", "ape"))
 
 print(paste0("rmse is: ", sd(test_2$resid)))
 
